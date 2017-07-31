@@ -1,7 +1,7 @@
 #include <string>
 #include <iostream>
+#include <functional>
 #include <boost/asio/ip/address.hpp>
-#include <boost/bind.hpp>
 
 #include <redisclient/redisasyncclient.h>
 
@@ -11,18 +11,18 @@ static const std::string redisValue = "unique-redis-value";
 class Worker
 {
 public:
-    Worker(boost::asio::io_service &ioService, RedisAsyncClient &redisClient)
+    Worker(boost::asio::io_service &ioService, redisclient::RedisAsyncClient &redisClient)
         : ioService(ioService), redisClient(redisClient)
     {}
 
     void onConnect(bool connected, const std::string &errorMessage);
-    void onSet(const RedisValue &value);
-    void onGet(const RedisValue &value);
+    void onSet(const redisclient::RedisValue &value);
+    void onGet(const redisclient::RedisValue &value);
     void stop();
 
 private:
     boost::asio::io_service &ioService;
-    RedisAsyncClient &redisClient;
+    redisclient::RedisAsyncClient &redisClient;
 };
 
 void Worker::onConnect(bool connected, const std::string &errorMessage)
@@ -33,18 +33,18 @@ void Worker::onConnect(bool connected, const std::string &errorMessage)
     }
     else
     {
-        redisClient.command("SET",  redisKey, redisValue,
-                            boost::bind(&Worker::onSet, this, _1));
+        redisClient.command("SET",  {redisKey, redisValue},
+                            std::bind(&Worker::onSet, this, std::placeholders::_1));
     }
 }
 
-void Worker::onSet(const RedisValue &value)
+void Worker::onSet(const redisclient::RedisValue &value)
 {
     std::cerr << "SET: " << value.toString() << std::endl;
     if( value.toString() == "OK" )
     {
-        redisClient.command("GET",  redisKey,
-                            boost::bind(&Worker::onGet, this, _1));
+        redisClient.command("GET",  {redisKey},
+                            std::bind(&Worker::onGet, this, std::placeholders::_1));
     }
     else
     {
@@ -52,7 +52,7 @@ void Worker::onSet(const RedisValue &value)
     }
 }
 
-void Worker::onGet(const RedisValue &value)
+void Worker::onGet(const redisclient::RedisValue &value)
 {
     std::cerr << "GET " << value.toString() << std::endl;
     if( value.toString() != redisValue )
@@ -60,8 +60,8 @@ void Worker::onGet(const RedisValue &value)
         std::cerr << "Invalid value from redis: " << value.toString() << std::endl;
     }
 
-    redisClient.command("DEL", redisKey,
-                        boost::bind(&boost::asio::io_service::stop, boost::ref(ioService)));
+    redisClient.command("DEL", {redisKey},
+                        std::bind(&boost::asio::io_service::stop, std::ref(ioService)));
 }
 
 
@@ -71,11 +71,12 @@ int main(int, char **)
     const int port = 6379;
 
     boost::asio::io_service ioService;
-    RedisAsyncClient client(ioService);
+    redisclient::RedisAsyncClient client(ioService);
     Worker worker(ioService, client);
     boost::asio::ip::tcp::endpoint endpoint(boost::asio::ip::address::from_string(address), port);
 
-    client.asyncConnect(endpoint, boost::bind(&Worker::onConnect, &worker, _1, _2));
+    client.asyncConnect(endpoint, std::bind(&Worker::onConnect, &worker,
+                std::placeholders::_1, std::placeholders::_2));
 
     ioService.run();
 

@@ -1,11 +1,12 @@
 #include <string>
 #include <iostream>
-#include <boost/bind.hpp>
 #include <boost/asio/ip/address.hpp>
 #include <boost/format.hpp>
 #include <boost/asio/deadline_timer.hpp>
 
 #include <redisclient/redisasyncclient.h>
+
+using namespace redisclient;
 
 static const std::string channelName = "unique-redis-channel-name-example";
 static const boost::posix_time::seconds timeout(1);
@@ -21,10 +22,8 @@ public:
           address(address), port(port),
           publisher(ioService), subscriber(ioService)
     {
-        publisher.installErrorHandler(boost::bind(&Client::connectPublisher, this));
-        subscriber.installErrorHandler(boost::bind(&Client::connectSubscriber, this));
-        //publisher.installErrorHandler(boost::bind(&Client::errorPubProxy, this, _1));
-        //subscriber.installErrorHandler(boost::bind(&Client::errorSubProxy, this, _1));
+        publisher.installErrorHandler(std::bind(&Client::connectPublisher, this));
+        subscriber.installErrorHandler(std::bind(&Client::connectSubscriber, this));
     }
 
     void publish(const std::string &str)
@@ -39,13 +38,13 @@ public:
     }
 
 protected:
-    void errorPubProxy(const std::string &err)
+    void errorPubProxy(const std::string &)
     {
         publishTimer.cancel();
         connectPublisher();
     }
 
-    void errorSubProxy(const std::string &err)
+    void errorSubProxy(const std::string &)
     {
         connectSubscriber();
     }
@@ -54,7 +53,7 @@ protected:
     {
         std::cerr << "connectPublisher\n";
 
-        if( publisher.isConnected() )
+        if( publisher.state() == RedisAsyncClient::State::Connected )
         {
             std::cerr << "disconnectPublisher\n";
 
@@ -63,21 +62,22 @@ protected:
         }
 
         publisher.connect(address, port,
-                          boost::bind(&Client::onPublisherConnected, this, _1, _2));
+                          std::bind(&Client::onPublisherConnected, this, std::placeholders::_1, std::placeholders::_2));
     }
 
     void connectSubscriber()
     {
         std::cerr << "connectSubscriber\n";
 
-        if( subscriber.isConnected() )
+        if( subscriber.state() == RedisAsyncClient::State::Connected ||
+                subscriber.state() == RedisAsyncClient::State::Subscribed )
         {
             std::cerr << "disconnectSubscriber\n";
             subscriber.disconnect();
         }
 
         subscriber.connect(address, port,
-                           boost::bind(&Client::onSubscriberConnected, this, _1, _2));
+                           std::bind(&Client::onSubscriberConnected, this, std::placeholders::_1, std::placeholders::_2));
     }
 
     void callLater(boost::asio::deadline_timer &timer,
@@ -98,7 +98,7 @@ protected:
         static size_t counter = 0;
         std::string msg = str(boost::format("message %1%")  % counter++);
 
-        if( publisher.isConnected() )
+        if( publisher.state() == RedisAsyncClient::State::Connected )
         {
             std::cerr << "pub " << msg << "\n";
             publish(msg);
@@ -133,7 +133,9 @@ protected:
         {
             std::cerr << "onSubscriberConnected ok\n";
             subscriber.subscribe(channelName,
-                                 boost::bind(&Client::onMessage, this, _1));
+                                 std::bind(&Client::onMessage, this, std::placeholders::_1));
+            subscriber.psubscribe("*",
+                                 std::bind(&Client::onMessage, this, std::placeholders::_1));
         }
     }
 

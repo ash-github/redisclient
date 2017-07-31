@@ -1,13 +1,32 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <redisclient/redisclient.h>
+#include <redisclient/redisparser.h>
+#include <redisclient/redisvalue.h>
 
 #define BOOST_TEST_MAIN
-#define BOOST_TEST_DYN_LINK
 #define BOOST_TEST_MODULE test_RedisParser
 
 #include <boost/test/unit_test.hpp>
+
+using namespace redisclient;
+
+class ParserFixture
+{
+public:
+    RedisValue parse(const char *str) {
+        if( parser.parse(str, strlen(str)).second == RedisParser::Completed)
+            return parser.result();
+        else
+            return RedisValue();
+    }
+
+    RedisParser::ParseResult parserResult(const char *str) {
+        return parser.parse(str, strlen(str)).second;
+    }
+
+    RedisParser parser;
+};
 
 void test(RedisParser &parser, const std::string &buf, const RedisValue &expected)
 {
@@ -34,8 +53,7 @@ void test(RedisParser &parser, const std::string &buf, const RedisValue &expecte
 }
 
 
-
-BOOST_AUTO_TEST_CASE(test_RedisParser)
+BOOST_AUTO_TEST_CASE(test_parser)
 {
     RedisParser parser;
 
@@ -129,3 +147,23 @@ BOOST_AUTO_TEST_CASE(test_RedisParser)
                      "bar\r\n", array);
     }
 }
+
+BOOST_FIXTURE_TEST_CASE(test_invalid_response, ParserFixture)
+{
+    BOOST_CHECK_EQUAL(parserResult("*xx\r\n"),  RedisParser::Error);
+}
+
+BOOST_FIXTURE_TEST_CASE(test_incomplete, ParserFixture)
+{
+    BOOST_CHECK_EQUAL(parserResult("*1\r\n"), RedisParser::Incompleted);
+}
+
+BOOST_FIXTURE_TEST_CASE(test_error, ParserFixture)
+{
+    RedisValue value = parse("-Error message\r\n");
+
+    BOOST_CHECK_EQUAL(value.toString(), "Error message");
+    BOOST_CHECK_EQUAL(value.isError(), true);
+    BOOST_CHECK_EQUAL(value.isOk(), false);
+}
+

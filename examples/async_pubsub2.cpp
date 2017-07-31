@@ -1,6 +1,6 @@
 #include <string>
 #include <iostream>
-#include <boost/bind.hpp>
+#include <functional>
 #include <boost/asio/ip/address.hpp>
 
 #include <redisclient/redisasyncclient.h>
@@ -29,10 +29,10 @@ private:
     boost::asio::io_service &ioService;
 };
 
-void publishHandler(RedisAsyncClient &publisher, const RedisValue &)
+void publishHandler(redisclient::RedisAsyncClient &publisher, const redisclient::RedisValue &)
 {
-    publisher.publish(channelName, "First hello", [&](const RedisValue &) {
-        publisher.publish(channelName, "Last hello", [&](const RedisValue &) {
+    publisher.publish(channelName, "First hello", [&](const redisclient::RedisValue &) {
+        publisher.publish(channelName, "Last hello", [&](const redisclient::RedisValue &) {
             publisher.publish(channelName, "stop");
         });
     });
@@ -44,8 +44,8 @@ int main(int, char **)
     const unsigned short port = 6379;
 
     boost::asio::io_service ioService;
-    RedisAsyncClient publisher(ioService);
-    RedisAsyncClient subscriber(ioService);
+    redisclient::RedisAsyncClient publisher(ioService);
+    redisclient::RedisAsyncClient subscriber(ioService);
     Client client(ioService);
 
     publisher.asyncConnect(address, port, [&](bool status, const std::string &err)
@@ -65,8 +65,8 @@ int main(int, char **)
                 else
                 {
                     subscriber.subscribe(channelName,
-                            boost::bind(&Client::onMessage, &client, _1),
-                            boost::bind(&publishHandler, boost::ref(publisher), _1));
+                            std::bind(&Client::onMessage, &client, std::placeholders::_1),
+                            std::bind(&publishHandler, std::ref(publisher), std::placeholders::_1));
                 }
             });
         }

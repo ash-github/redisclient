@@ -7,15 +7,15 @@
 #define REDISCLIENT_REDISCLIENTIMPL_CPP
 
 #include <boost/asio/write.hpp>
-#include <boost/bind.hpp>
-#include <boost/lexical_cast.hpp>
 
 #include <algorithm>
 
 #include "redisclientimpl.h"
 
+namespace redisclient {
+
 RedisClientImpl::RedisClientImpl(boost::asio::io_service &ioService)
-    : strand(ioService), socket(ioService), subscribeSeq(0), state(NotConnected)
+    : strand(ioService), socket(ioService), subscribeSeq(0), state(State::Unconnected)
 {
 }
 
@@ -24,9 +24,9 @@ RedisClientImpl::~RedisClientImpl()
     close();
 }
 
-void RedisClientImpl::close()
+void RedisClientImpl::close() noexcept
 {
-    if( state != RedisClientImpl::Closed )
+    if( state != State::Closed )
     {
         boost::system::error_code ignored_ec;
 
@@ -35,7 +35,7 @@ void RedisClientImpl::close()
         socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored_ec);
         socket.close(ignored_ec);
 
-        state = RedisClientImpl::Closed;
+        state = State::Closed;
     }
 }
 
@@ -46,33 +46,33 @@ RedisClientImpl::State RedisClientImpl::getState() const
 
 void RedisClientImpl::processMessage()
 {
-    using boost::system::error_code;
-
     socket.async_read_some(boost::asio::buffer(buf),
-                           boost::bind(&RedisClientImpl::asyncRead,
-                                       shared_from_this(), _1, _2));
+                           std::bind(&RedisClientImpl::asyncRead,
+                                       shared_from_this(), std::placeholders::_1, std::placeholders::_2));
 }
 
-void RedisClientImpl::doProcessMessage(const RedisValue &v)
+void RedisClientImpl::doProcessMessage(RedisValue v)
 {
-    if( state == RedisClientImpl::Subscribed )
+    if( state == State::Subscribed )
     {
         std::vector<RedisValue> result = v.toArray();
+        auto resultSize = result.size();
 
-        if( result.size() == 3 )
+        if( resultSize >= 3 )
         {
-            const RedisValue &command = result[0];
-            const RedisValue &queueName = result[1];
-            const RedisValue &value = result[2];
+            const RedisValue &command   = result[0];
+            const RedisValue &queueName = result[(resultSize == 3)?1:2];
+            const RedisValue &value     = result[(resultSize == 3)?2:3];
+            const RedisValue &pattern   = (resultSize == 4) ? result[1] : "";
 
-            const std::string &cmd = command.toString();
+            std::string cmd = command.toString();
 
-            if( cmd == "message" )
+            if( cmd == "message" || cmd == "pmessage" )
             {
                 SingleShotHandlersMap::iterator it = singleShotMsgHandlers.find(queueName.toString());
                 if( it != singleShotMsgHandlers.end() )
                 {
-                    strand.post(boost::bind(it->second, value.toByteArray()));
+                    strand.post(std::bind(it->second, value.toByteArray()));
                     singleShotMsgHandlers.erase(it);
                 }
 
@@ -81,17 +81,15 @@ void RedisClientImpl::doProcessMessage(const RedisValue &v)
                 for(MsgHandlersMap::iterator handlerIt = pair.first;
                     handlerIt != pair.second; ++handlerIt)
                 {
-                    strand.post(boost::bind(handlerIt->second.second, value.toByteArray()));
+                    strand.post(std::bind(handlerIt->second.second, value.toByteArray()));
                 }
             }
-            else if( cmd == "subscribe" && handlers.empty() == false )
+            else if( handlers.empty() == false &&
+                    (cmd == "subscribe" || cmd == "unsubscribe" ||
+                    cmd == "psubscribe" || cmd == "punsubscribe")
+                   )
             {
-                handlers.front()(v);
-                handlers.pop();
-            }
-            else if(cmd == "unsubscribe" && handlers.empty() == false )
-            {
-                handlers.front()(v);
+                handlers.front()(std::move(v));
                 handlers.pop();
             }
             else
@@ -105,6 +103,7 @@ void RedisClientImpl::doProcessMessage(const RedisValue &v)
                 return;
             }
         }
+
         else
         {
             errorHandler("[RedisClient] Protocol error");
@@ -115,7 +114,7 @@ void RedisClientImpl::doProcessMessage(const RedisValue &v)
     {
         if( handlers.empty() == false )
         {
-            handlers.front()(v);
+            handlers.front()(std::move(v));
             handlers.pop();
         }
         else
@@ -131,70 +130,75 @@ void RedisClientImpl::doProcessMessage(const RedisValue &v)
     }
 }
 
-void RedisClientImpl::asyncWrite(const boost::system::error_code &ec, const size_t)
+void RedisClientImpl::asyncWrite(const boost::system::error_code &ec, size_t)
 {
+    dataWrited.clear();
+
     if( ec )
     {
         errorHandler(ec.message());
         return;
     }
 
-    assert(queue.empty() == false);
-    queue.pop();
-
-    if( queue.empty() == false )
+    if( dataQueued.empty() == false )
     {
-        const QueueItem &item = queue.front();
-        
-        boost::asio::async_write(socket,
-                                 boost::asio::buffer(item.buff->data(), item.buff->size()),
-                                 boost::bind(&RedisClientImpl::asyncWrite, shared_from_this(), _1, _2));
+        std::vector<boost::asio::const_buffer> buffers(dataQueued.size());
+
+        for(size_t i = 0; i < dataQueued.size(); ++i)
+        {
+            buffers[i] = boost::asio::buffer(dataQueued[i]);
+        }
+
+        std::swap(dataQueued, dataWrited);
+
+        boost::asio::async_write(socket, buffers,
+                std::bind(&RedisClientImpl::asyncWrite, shared_from_this(),
+                    std::placeholders::_1, std::placeholders::_2));
     }
 }
 
 void RedisClientImpl::handleAsyncConnect(const boost::system::error_code &ec,
-                                         const boost::function<void(bool, const std::string &)> &handler)
+                                         const std::function<void(bool, const std::string &)> &handler)
 {
     if( !ec )
     {
-        socket.set_option(boost::asio::ip::tcp::no_delay(true));
-        state = RedisClientImpl::Connected;
+        boost::system::error_code ec2; // Ignore errors in set_option
+        socket.set_option(boost::asio::ip::tcp::no_delay(true), ec2);
+        state = State::Connected;
         handler(true, std::string());
         processMessage();
     }
     else
     {
+        state = State::Unconnected;
         handler(false, ec.message());
     }
 }
 
-std::vector<char> RedisClientImpl::makeCommand(const std::vector<RedisBuffer> &items)
+std::vector<char> RedisClientImpl::makeCommand(const std::deque<RedisBuffer> &items)
 {
     static const char crlf[] = {'\r', '\n'};
 
     std::vector<char> result;
 
     append(result, '*');
-    append(result, boost::lexical_cast<std::string>(items.size()));
+    append(result, std::to_string(items.size()));
     append<>(result, crlf);
 
-    std::vector<RedisBuffer>::const_iterator it = items.begin(), end = items.end();
-    for(; it != end; ++it)
+    for(const RedisBuffer &item: items)
     {
         append(result, '$');
-        append(result, boost::lexical_cast<std::string>(it->size()));
+        append(result, std::to_string(item.size()));
         append<>(result, crlf);
-        append(result, *it);
+        append(result, item);
         append<>(result, crlf);
     }
 
     return result;
 }
 
-RedisValue RedisClientImpl::doSyncCommand(const std::vector<RedisBuffer> &buff)
+RedisValue RedisClientImpl::doSyncCommand(const std::deque<RedisBuffer> &buff)
 {
-    assert( queue.empty() );
-
     boost::system::error_code ec;
 
 
@@ -218,7 +222,7 @@ RedisValue RedisClientImpl::doSyncCommand(const std::vector<RedisBuffer> &buff)
 
             for(size_t pos = 0; pos < size;)
             {
-                std::pair<size_t, RedisParser::ParseResult> result = 
+                std::pair<size_t, RedisParser::ParseResult> result =
                     redisParser.parse(inbuff.data() + pos, size - pos);
 
                 if( result.second == RedisParser::Completed )
@@ -240,22 +244,16 @@ RedisValue RedisClientImpl::doSyncCommand(const std::vector<RedisBuffer> &buff)
     }
 }
 
-void RedisClientImpl::doAsyncCommand(const std::vector<char> &buff,
-                                     const boost::function<void(const RedisValue &)> &handler)
+void RedisClientImpl::doAsyncCommand(std::vector<char> buff,
+                                     std::function<void(RedisValue)> handler)
 {
-    QueueItem item;
+    handlers.push( std::move(handler) );
+    dataQueued.push_back(std::move(buff));
 
-    item.buff.reset( new std::vector<char>(buff) );
-    item.handler = handler;
-    queue.push(item);
-
-    handlers.push( item.handler );
-
-    if( queue.size() == 1 )
+    if( dataWrited.empty() )
     {
-        boost::asio::async_write(socket, 
-                                 boost::asio::buffer(item.buff->data(), item.buff->size()),
-                                 boost::bind(&RedisClientImpl::asyncWrite, shared_from_this(), _1, _2));
+        // start transmit process
+        asyncWrite(boost::system::error_code(), 0);
     }
 }
 
@@ -263,7 +261,10 @@ void RedisClientImpl::asyncRead(const boost::system::error_code &ec, const size_
 {
     if( ec || size == 0 )
     {
-        errorHandler(ec.message());
+        if( state != State::Closed )
+        {
+            errorHandler(ec.message());
+        }
         return;
     }
 
@@ -273,7 +274,7 @@ void RedisClientImpl::asyncRead(const boost::system::error_code &ec, const size_
 
         if( result.second == RedisParser::Completed )
         {
-            doProcessMessage(redisParser.result());
+            doProcessMessage(std::move(redisParser.result()));
         }
         else if( result.second == RedisParser::Incompleted )
         {
@@ -290,13 +291,11 @@ void RedisClientImpl::asyncRead(const boost::system::error_code &ec, const size_
     }
 
     processMessage();
-
 }
 
 void RedisClientImpl::onRedisError(const RedisValue &v)
 {
-    std::string message = v.toString();
-    errorHandler(message);
+    errorHandler(v.toString());
 }
 
 void RedisClientImpl::defaulErrorHandler(const std::string &s)
@@ -323,6 +322,125 @@ void RedisClientImpl::append(std::vector<char> &vec, char c)
 {
     vec.resize(vec.size() + 1);
     vec[vec.size() - 1] = c;
+}
+
+size_t RedisClientImpl::subscribe(
+    const std::string &command,
+    const std::string &channel,
+    std::function<void(std::vector<char> msg)> msgHandler,
+    std::function<void(RedisValue)> handler)
+{
+    assert(state == State::Connected ||
+           state == State::Subscribed);
+
+    if (state == State::Connected || state == State::Subscribed)
+    {
+        std::deque<RedisBuffer> items{ command, channel };
+
+        post(std::bind(&RedisClientImpl::doAsyncCommand, this, makeCommand(items), std::move(handler)));
+        msgHandlers.insert(std::make_pair(channel, std::make_pair(subscribeSeq, std::move(msgHandler))));
+        state = State::Subscribed;
+
+        return subscribeSeq++;
+    }
+    else
+    {
+        std::stringstream ss;
+
+        ss << "RedisClientImpl::subscribe called with invalid state "
+            << to_string(state);
+
+        errorHandler(ss.str());
+        return 0;
+    }
+}
+
+void RedisClientImpl::singleShotSubscribe(
+    const std::string &command,
+    const std::string &channel,
+    std::function<void(std::vector<char> msg)> msgHandler,
+    std::function<void(RedisValue)> handler)
+{
+    assert(state == State::Connected ||
+           state == State::Subscribed);
+
+    if (state == State::Connected ||
+        state == State::Subscribed)
+    {
+        std::deque<RedisBuffer> items{ command, channel };
+
+        post(std::bind(&RedisClientImpl::doAsyncCommand, this, makeCommand(items), std::move(handler)));
+        singleShotMsgHandlers.insert(std::make_pair(channel, std::move(msgHandler)));
+        state = State::Subscribed;
+    }
+    else
+    {
+        std::stringstream ss;
+
+        ss << "RedisClientImpl::singleShotSubscribe called with invalid state "
+            << to_string(state);
+
+        errorHandler(ss.str());
+    }
+}
+
+void RedisClientImpl::unsubscribe(const std::string &command, 
+                                  size_t handleId, 
+                                  const std::string &channel,
+                                  std::function<void(RedisValue)> handler)
+{
+#ifdef DEBUG
+    static int recursion = 0;
+    assert(recursion++ == 0);
+#endif
+
+    assert(state == State::Connected ||
+           state == State::Subscribed);
+
+    if (state == State::Connected ||
+        state == State::Subscribed)
+    {
+        // Remove subscribe-handler
+        typedef RedisClientImpl::MsgHandlersMap::iterator iterator;
+        std::pair<iterator, iterator> pair = msgHandlers.equal_range(channel);
+
+        for (iterator it = pair.first; it != pair.second;)
+        {
+            if (it->second.first == handleId)
+            {
+                msgHandlers.erase(it++);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        std::deque<RedisBuffer> items{ command, channel };
+
+        // Unsubscribe command for Redis
+        post(std::bind(&RedisClientImpl::doAsyncCommand, this,
+             makeCommand(items), handler));
+    }
+    else
+    {
+        std::stringstream ss;
+
+        ss << "RedisClientImpl::unsubscribe called with invalid state "
+            << to_string(state);
+
+#ifdef DEBUG
+        --recursion;
+#endif
+        errorHandler(ss.str());
+        return;
+    }
+
+#ifdef DEBUG
+    --recursion;
+#endif
+}
+
 }
 
 #endif // REDISCLIENT_REDISCLIENTIMPL_CPP

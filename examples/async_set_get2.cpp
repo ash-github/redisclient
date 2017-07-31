@@ -1,5 +1,6 @@
 #include <string>
 #include <iostream>
+#include <functional>
 #include <boost/asio/io_service.hpp>
 #include <boost/asio/ip/address.hpp>
 
@@ -8,18 +9,18 @@
 static const std::string redisKey = "unique-redis-key-example";
 static const std::string redisValue = "unique-redis-value";
 
-void handleConnected(boost::asio::io_service &ioService, RedisAsyncClient &redis,
+void handleConnected(boost::asio::io_service &ioService, redisclient::RedisAsyncClient &redis,
         bool ok, const std::string &errmsg)
 {
     if( ok )
     {
-        redis.command("SET", redisKey, redisValue, [&](const RedisValue &v) {
+        redis.command("SET", {redisKey, redisValue}, [&](const redisclient::RedisValue &v) {
             std::cerr << "SET: " << v.toString() << std::endl;
 
-            redis.command("GET", redisKey, [&](const RedisValue &v) {
+            redis.command("GET", {redisKey}, [&](const redisclient::RedisValue &v) {
                 std::cerr << "GET: " << v.toString() << std::endl;
 
-                redis.command("DEL", redisKey, [&](const RedisValue &) {
+                redis.command("DEL", {redisKey}, [&](const redisclient::RedisValue &) {
                     ioService.stop();
                 });
             });
@@ -37,10 +38,11 @@ int main(int, char **)
     const unsigned short port = 6379;
 
     boost::asio::io_service ioService;
-    RedisAsyncClient redis(ioService);
+    redisclient::RedisAsyncClient redis(ioService);
 
     redis.asyncConnect(address, port,
-            boost::bind(&handleConnected, boost::ref(ioService), boost::ref(redis), _1, _2));
+            std::bind(&handleConnected, std::ref(ioService), std::ref(redis),
+                std::placeholders::_1, std::placeholders::_2));
 
     ioService.run();
 

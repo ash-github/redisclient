@@ -11,8 +11,12 @@
 
 #include <string>
 #include <list>
+#include <vector>
+#include <string.h>
 
 #include "config.h"
+
+namespace redisclient {
 
 class RedisBuffer
 {
@@ -67,5 +71,7 @@ const char *RedisBuffer::data() const
     return ptr_;
 }
 
-#endif //REDISSYNCCLIENT_REDISBUFFER_H 
+}
+
+#endif //REDISSYNCCLIENT_REDISBUFFER_H
 

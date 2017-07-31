@@ -1,10 +1,3 @@
-cmake_minimum_required(VERSION 2.6)
-
-FIND_PACKAGE(Boost COMPONENTS system REQUIRED)
-
-SET(CMAKE_CXX_FLAGS "-W -Wall -Wextra -fPIC -pthread -std=c++11")
-SET(CMAKE_CXX_FLAGS_DEBUG "-O0 -g3 -DDEBUG ")
-SET(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
 
 SET(REDISCLIENT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/redisclient/impl/redisvalue.cpp
@@ -17,7 +10,6 @@ SET(REDISCLIENT_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/redisclient/redisvalue.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/redisclient/redissyncclient.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/redisclient/redisparser.h
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/redisclient/redisclient.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/redisclient/redisbuffer.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/redisclient/redisasyncclient.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/redisclient/impl/redisclientimpl.h
@@ -34,10 +26,21 @@ SET(EXAMPLES
     async_set_get2.cpp
     async_set_get.cpp
     sync_set_get.cpp
+    benchmark.cpp
 )
+
+FOREACH(FILE ${REDISCLIENT_SOURCES})
+    SET_SOURCE_FILES_PROPERTIES(${FILE} PROPERTIES HEADER_FILE_ONLY TRUE)
+ENDFOREACH()
 
 FOREACH(EXAMPLE ${EXAMPLES})
     GET_FILENAME_COMPONENT(EXECUTABLE ${EXAMPLE} NAME_WE)
     ADD_EXECUTABLE(${EXECUTABLE} ${EXAMPLE} ${REDISCLIENT_SOURCES})
-    TARGET_LINK_LIBRARIES(${EXECUTABLE} ${Boost_LIBRARIES})
+    TARGET_LINK_LIBRARIES(${EXECUTABLE} ${Boost_SYSTEM_LIBRARY} ${Boost_DATE_TIME_LIBRARY})
 ENDFOREACH(EXAMPLE)
+
+TARGET_LINK_LIBRARIES(benchmark
+    ${Boost_PROGRAM_OPTIONS_LIBRARY}
+    ${Boost_DATE_TIME_LIBRARY}
+)
+
